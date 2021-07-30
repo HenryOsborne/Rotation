@@ -6,6 +6,9 @@ from torchvision.ops import nms
 from retinanet.utils import BasicBlock, Bottleneck, BBoxTransform, ClipBoxes
 from retinanet.anchors import Anchors
 from retinanet import losses
+from utils import nms_rotate
+import cv2
+import numpy as np
 
 model_urls = {
     'resnet18': 'https://download.pytorch.org/models/resnet18-5c106cde.pth',
@@ -198,6 +201,8 @@ class ResNet(nn.Module):
 
         self.focalLoss = losses.FocalLoss()
 
+        self.num_classes = num_classes
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
@@ -245,6 +250,8 @@ class ResNet(nn.Module):
         else:
             img_batch = inputs
 
+        batch = img_batch.shape[0]
+
         x = self.conv1(img_batch)
         x = self.bn1(x)
         x = self.relu(x)
@@ -266,7 +273,140 @@ class ResNet(nn.Module):
         if self.training:
             return self.focalLoss(classification, regression, anchors, annotations_h, annotations_r)
         else:
-            transformed_anchors = self.regressBoxes(anchors, regression)
+            anchors = anchors[0, :, :]
+            x_c = (anchors[:, 2] + anchors[:, 0]) / 2
+            y_c = (anchors[:, 3] + anchors[:, 1]) / 2
+            w = anchors[:, 2] - anchors[:, 0] + 1
+            h = anchors[:, 3] - anchors[:, 1] + 1
+            anchors = torch.stack([x_c, y_c, w, h], dim=1)
+
+            return_boxes_pred = []
+            return_scores = []
+            return_labels = []
+
+            for i in range(batch):
+                bbox_pred = regression[i, ...]
+                cls_prob = classification[i, ...]
+
+                dx1 = bbox_pred[:, 0]
+                dy1 = bbox_pred[:, 1]
+                dx2 = bbox_pred[:, 2]
+                dy2 = bbox_pred[:, 3]
+                dx3 = bbox_pred[:, 4]
+                dy3 = bbox_pred[:, 5]
+                dx4 = bbox_pred[:, 6]
+                dy4 = bbox_pred[:, 7]
+
+                pred_x_1 = dx1 * anchors[:, 2] + anchors[:, 0]
+                pred_y_1 = dy1 * anchors[:, 3] + anchors[:, 1]
+                pred_x_2 = dx2 * anchors[:, 2] + anchors[:, 0]
+                pred_y_2 = dy2 * anchors[:, 3] + anchors[:, 1]
+                pred_x_3 = dx3 * anchors[:, 2] + anchors[:, 0]
+                pred_y_3 = dy3 * anchors[:, 3] + anchors[:, 1]
+                pred_x_4 = dx4 * anchors[:, 2] + anchors[:, 0]
+                pred_y_4 = dy4 * anchors[:, 3] + anchors[:, 1]
+
+                boxes_pred = torch.stack([pred_x_1, pred_y_1,
+                                          pred_x_2, pred_y_2,
+                                          pred_x_3, pred_y_3,
+                                          pred_x_4, pred_y_4], dim=1)
+
+                batch_boxes_pred = []
+                batch_scores = []
+                batch_labels = []
+
+                for j in range(0, 15):
+                    indices = filter_detections(boxes_pred, cls_prob[:, j], self.training)
+                    if indices.shape[0] == 0:
+                        continue
+                    tmp_boxes_pred = boxes_pred[indices].reshape(-1, 8)
+                    tmp_scores = cls_prob[:, j][indices].reshape(-1, )
+
+                    batch_boxes_pred.extend(tmp_boxes_pred)
+                    batch_scores.extend(tmp_scores)
+                    batch_labels.extend(torch.ones_like(tmp_scores) * (j + 1))
+
+                if len(batch_boxes_pred) == 0:  # 可能存在图片中没有目标的情况
+                    batch_boxes_pred = torch.as_tensor([])
+                    batch_scores = torch.as_tensor([])
+                    batch_labels = torch.as_tensor([])
+                else:
+                    batch_boxes_pred = torch.stack(batch_boxes_pred)
+                    batch_scores = torch.stack(batch_scores)
+                    batch_labels = torch.stack(batch_labels)
+
+                return_boxes_pred.append(batch_boxes_pred)
+                return_scores.append(batch_scores)
+                return_labels.append(batch_labels)
+
+            return return_scores, return_labels, return_boxes_pred
+
+
+def backward_convert(coordinate, with_label=True):
+    """
+    :param coordinate: format [x1, y1, x2, y2, x3, y3, x4, y4, (label)]
+    :param with_label: default True
+    :return: format [x_c, y_c, w, h, theta, (label)]
+    """
+
+    boxes = []
+    if with_label:
+        for rect in coordinate:
+            box = np.int0(rect[:-1])
+            box = box.reshape([-1, 2])
+            rect1 = cv2.minAreaRect(box)
+
+            x, y, w, h, theta = rect1[0][0], rect1[0][1], rect1[1][0], rect1[1][1], rect1[2]
+
+            if theta == 0:
+                w, h = h, w
+                theta -= 90
+
+            boxes.append([x, y, w, h, theta, rect[-1]])
+
+    else:
+        for rect in coordinate:
+            box = np.int0(rect)
+            box = box.reshape([-1, 2])
+            rect1 = cv2.minAreaRect(box)
+
+            x, y, w, h, theta = rect1[0][0], rect1[0][1], rect1[1][0], rect1[1][1], rect1[2]
+
+            if theta == 0:
+                w, h = h, w
+                theta -= 90
+
+            boxes.append([x, y, w, h, theta])
+    return np.array(boxes, dtype=np.float32)
+
+
+def filter_detections(boxes, scores, training, gpu_id=0):
+    indices = torch.where(scores > 0.05)[0]
+
+    filtered_boxes = boxes[indices].cpu()
+    filtered_scores = scores[indices].cpu().numpy()
+
+    filtered_boxes = backward_convert(filtered_boxes, False)
+
+    # [x, y, w, h, theta]
+    max_output_size = 4000  # DOTA dataset
+    nms_indices = nms_rotate.nms_rotate(decode_boxes=filtered_boxes,
+                                        scores=filtered_scores.reshape(-1, ),
+                                        iou_threshold=0.3,
+                                        max_output_size=max_output_size,
+                                        use_gpu=torch.cuda.is_available(),
+                                        gpu_id=gpu_id)
+
+    # filter indices based on NMS
+    indices = indices[nms_indices]
+
+    # add indices to list of all indices
+    # return indices
+    return indices
+
+
+'''
+transformed_anchors = self.regressBoxes(anchors, regression)
             transformed_anchors = self.clipBoxes(transformed_anchors, img_batch)
 
             finalResult = [[], [], []]
@@ -305,6 +445,7 @@ class ResNet(nn.Module):
                 finalAnchorBoxesCoordinates = torch.cat((finalAnchorBoxesCoordinates, anchorBoxes[anchors_nms_idx]))
 
             return [finalScores, finalAnchorBoxesIndexes, finalAnchorBoxesCoordinates]
+'''
 
 
 def resnet18(num_classes, pretrained=False, **kwargs):

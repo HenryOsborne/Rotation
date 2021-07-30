@@ -30,7 +30,7 @@ def main(args=None):
     parser.add_argument('--csv_val', help='Path to file containing validation annotations (optional, see readme)')
 
     parser.add_argument('--depth', help='Resnet depth, must be one of 18, 34, 50, 101, 152', type=int, default=50)
-    parser.add_argument('--epochs', help='Number of epochs', type=int, default=2)
+    parser.add_argument('--epochs', help='Number of epochs', type=int, default=50)
 
     parser = parser.parse_args(args)
 
@@ -188,7 +188,7 @@ def main(args=None):
 
     retinanet.eval()
 
-    torch.save(retinanet, 'model_final.pt')
+    torch.save(retinanet, 'work_dir/model_final.pt')
 
 
 if __name__ == '__main__':

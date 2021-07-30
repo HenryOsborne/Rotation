@@ -30,7 +30,7 @@ def main(args=None):
     parser.add_argument('--csv_classes', help='Path to file containing class list (see readme)')
     parser.add_argument('--csv_val', help='Path to file containing validation annotations (optional, see readme)')
 
-    parser.add_argument('--model', help='Path to model (.pt) file.')
+    parser.add_argument('--model', help='Path to model (.pt) file.', default='work_dir/dota_retinanet_49.pt')
 
     parser = parser.parse_args(args)
 
@@ -42,7 +42,7 @@ def main(args=None):
                                  transform=transforms.Compose([Normalizer(), Resizer()]))
     elif parser.dataset == 'dota':
         dataset_val = DotaDataset(parser.coco_path, set_name='images',
-                                  transform=transforms.Compose([Normalizer(), Resizer()]))
+                                  transform=transforms.Compose([Normalizer(), Resizer()]), show=False)
     else:
         raise ValueError('Dataset type not understood (must be csv or coco), exiting.')
 
@@ -77,34 +77,43 @@ def main(args=None):
         with torch.no_grad():
             st = time.time()
             if torch.cuda.is_available():
-                scores, classification, transformed_anchors = retinanet(data['img'].cuda().float())
+                batch_scores, batch_labals, batch_bbox_pred = retinanet(data['img'].cuda().float())
             else:
-                scores, classification, transformed_anchors = retinanet(data['img'].float())
+                batch_scores, batch_labals, batch_bbox_pred = retinanet(data['img'].float())
             print('Elapsed time: {}'.format(time.time() - st))
-            idxs = np.where(scores.cpu() > 0.5)
-            img = np.array(255 * unnormalize(data['img'][0, :, :, :])).copy()
 
-            img[img < 0] = 0
-            img[img > 255] = 255
+            for i in range(len(batch_scores)):
+                scores, label, bbox_pred = batch_scores[i], batch_labals[i], batch_bbox_pred[i]
 
-            img = np.transpose(img, (1, 2, 0))
+                idxs = np.where(scores.cpu() > 0.5)[0]
 
-            img = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2RGB)
+                img = np.array(255 * unnormalize(data['img'][i, :, :, :])).copy()
+                img[img < 0] = 0
+                img[img > 255] = 255
+                img = np.transpose(img, (1, 2, 0))
+                img = cv2.cvtColor(img.astype(np.uint8), cv2.COLOR_BGR2RGB)
 
-            for j in range(idxs[0].shape[0]):
-                bbox = transformed_anchors[idxs[0][j], :]
-                x1 = int(bbox[0])
-                y1 = int(bbox[1])
-                x2 = int(bbox[2])
-                y2 = int(bbox[3])
-                label_name = dataset_val.labels[int(classification[idxs[0][j]])]
-                draw_caption(img, (x1, y1, x2, y2), label_name)
+                for j in range(idxs.shape[0]):
+                    bbox = bbox_pred[idxs[j], :]
+                    x1 = int(bbox[0])
+                    y1 = int(bbox[1])
+                    x2 = int(bbox[2])
+                    y2 = int(bbox[3])
+                    x3 = int(bbox[4])
+                    y3 = int(bbox[5])
+                    x4 = int(bbox[6])
+                    y4 = int(bbox[7])
+                    label_name = dataset_val.labels[int(label[idxs[j]]) - 1]
+                    draw_caption(img, (x1, y1, x2, y2), label_name)
 
-                cv2.rectangle(img, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
-                print(label_name)
+                    cv2.line(img, (x1, y1), (x2, y2), color=(0, 0, 255), thickness=2)
+                    cv2.line(img, (x2, y2), (x3, y3), color=(0, 0, 255), thickness=2)
+                    cv2.line(img, (x3, y3), (x4, y4), color=(0, 0, 255), thickness=2)
+                    cv2.line(img, (x4, y4), (x1, y1), color=(0, 0, 255), thickness=2)
 
-            cv2.imshow('img', img)
-            cv2.waitKey(0)
+                cv2.imshow('img', img)
+                cv2.waitKey()
+                cv2.destroyAllWindows()
 
 
 if __name__ == '__main__':

@@ -502,8 +502,8 @@ def collater(data):
 
     padded_imgs = padded_imgs.permute(0, 3, 1, 2)
 
-    if len(scales) == 1:  # 在batch size为1时显示图片和GT BOX
-        show_(padded_imgs.squeeze(0), annot_padded_h.squeeze(0), annot_padded_r.squeeze(0))
+    # if len(scales) == 1:  # 在batch size为1时显示图片和GT BOX
+    #     show_(padded_imgs.squeeze(0), annot_padded_h.squeeze(0), annot_padded_r.squeeze(0))
 
     return {'img': padded_imgs, 'annot_h': annot_padded_h, 'annot_r': annot_padded_r, 'scale': scales}
 
